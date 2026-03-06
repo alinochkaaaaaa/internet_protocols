@@ -48,9 +48,14 @@ miralogic-net-200, 12668, RU
 imgu-net, 60600, RU
 
 
+ЗАПУСК: powershell от администратора ( сначала проверить соединение )
 
+ping yandex.com
+tracert -h 5 yandex.com
 
-PS C:\Users\Алина\PycharmProjects\protocol_1_task> python tracert.py yandex.com
+python tracert.py yandex.com
+
+>>>
 Трассировка маршрута к yandex.com [5.255.255.77]
 1. 10.249.0.1
 local
