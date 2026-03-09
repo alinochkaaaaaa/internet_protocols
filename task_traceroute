@@ -1,3 +1,14 @@
+ЗАПУСК: powershell от администратора ( сначала проверить соединение )
+
+ping yandex.com
+tracert -h 5 yandex.com
+
+C:\Users\Алина\PycharmProjects\protocol_1_task
+python tracert.py yandex.com
+python tracert.py chess.com
+
+
+````````````````````````````````````````````
 Формулировка
 TRACERT-AS
 10 баллов
@@ -48,35 +59,28 @@ miralogic-net-200, 12668, RU
 imgu-net, 60600, RU
 
 
-ЗАПУСК: powershell от администратора ( сначала проверить соединение )
+```````````````````````````````````````````
 
-ping yandex.com
-tracert -h 5 yandex.com
-
-python tracert.py yandex.com
-
->>>
+PS C:\Users\Алина\PycharmProjects\protocol_1_task> python tracert.py yandex.com
 Трассировка маршрута к yandex.com [5.255.255.77]
-1. 10.249.0.1
+
+1. 192.168.0.1
 local
 
-2. 10.255.104.1
-local
+2. 94.50.136.1
+USI_ADSL_USERS, AS12389, RU
 
-3. 10.255.100.1
-local
+3. 185.140.148.159
+RU-RTK-20160226, AS12389, RU
 
-4. 31.131.198.137
-ERTH-LIPETSK-PPPOE-21-NET, AS9049, RU
+4. 94.25.47.123
+Comlines-Net, AS12389, RU
 
-5. 188.234.76.65
-ERTH-OMSK-PPPOE-31-NET, AS41843, RU
+5. *
 
-6. 188.234.76.74
-ERTH-OMSK-PPPOE-31-NET, AS41843, RU
+6. *
 
-7. 10.7.5.1
-local
-
-8. 5.255.255.77
+7. 5.255.255.77
 YANDEX-5-255-255-0, AS13238, RU
+
+Трассировка завершена
