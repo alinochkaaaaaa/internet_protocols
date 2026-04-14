@@ -1,251 +1,217 @@
-import argparse
 import socket
+import argparse
+import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
+import struct
 
-# Словарь известных портов и протоколов
-PORT_PROTOCOLS = {
-    20: 'FTP-data', 21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP',
-    53: 'DNS', 80: 'HTTP', 110: 'POP3', 135: 'RPC', 139: 'NetBIOS',
-    143: 'IMAP', 443: 'HTTPS', 445: 'SMB', 993: 'IMAPS', 995: 'POP3S',
-    3306: 'MySQL', 3389: 'RDP', 5432: 'PostgreSQL', 8080: 'HTTP-alt'
-}
-
-# Сигнатуры для распознавания протоколов по баннеру
-BANNER_SIGNATURES = {
-    21: [(b'220', 'FTP')],
-    22: [(b'SSH', 'SSH')],
-    25: [(b'220', 'SMTP')],
-    53: [(b'', 'DNS')],
-    80: [(b'HTTP', 'HTTP'), (b'html', 'HTTP')],
-    110: [(b'+OK', 'POP3'), (b'-ERR', 'POP3')],
-    143: [(b'* OK', 'IMAP'), (b'OK', 'IMAP')],
-    123: [(b'\x1b', 'NTP')],
-    443: [(b'HTTP', 'HTTPS')],
+PROBES = {
+    'HTTP': b'HEAD / HTTP/1.0\r\nHost: test\r\n\r\n',
+    'SMTP': b'EHLO test\r\n',
+    'POP3': b'CAPA\r\n',
+    'IMAP': b'CAPABILITY\r\n',
+    'NTP': b'\x1b' + 47 * b'\0',
+    'SNMP': b'\x30\x26\x02\x01\x00\x04\x06\x70\x75\x62\x6c\x69\x63\xa0\x19\x02\x02\x1f\x40\x02\x01\x00\x02\x01\x00\x30\x0d\x30\x0b\x06\x07\x2b\x06\x01\x02\x01\x01\x01\x05\x00',
 }
 
 
-def get_protocol_by_banner(port, banner):
-    """Определяет протокол по баннеру"""
-    if port in BANNER_SIGNATURES:
-        for signature, protocol in BANNER_SIGNATURES[port]:
-            if signature in banner:
-                return protocol
-    return None
+def create_dns_query(domain="google.com"):
+    """Создает DNS запрос"""
+    transaction_id = random.randint(0, 65535)
+    flags = 0x0100
+    questions = 1
+    header = struct.pack('!HHHHHH', transaction_id, flags, questions, 0, 0, 0)
+
+    qname = b''
+    for part in domain.split('.'):
+        qname += bytes([len(part)]) + part.encode()
+    qname += b'\x00'
+
+    question = qname + struct.pack('!HH', 1, 1)  # Type A, Class IN
+    return header + question
 
 
-def scan_tcp_port(host, port, timeout=2):
-    """Сканирует TCP порт и определяет протокол"""
+def check_tcp_protocol(data):
+    """Определяет протокол TCP по ответу"""
+    if not data:
+        return ""
+
+    try:
+        text = data.decode('utf-8', errors='ignore').upper()
+    except:
+        return ""
+
+    if any(x in text for x in ['HTTP/', 'HTTP/1', '200 OK', '404']):
+        return 'HTTP'
+    if any(x in text for x in ['220 ', '250 ', 'SMTP', 'ESMTP']):
+        return 'SMTP'
+    if any(x in text for x in ['+OK', '-ERR', 'POP3']):
+        return 'POP3'
+    if any(x in text for x in ['* OK', ' OK ', 'IMAP', 'CAPABILITY']):
+        return 'IMAP'
+    if 'SSH-' in text:
+        return 'SSH'
+    if '220-' in text or 'FTP' in text:
+        return 'FTP'
+
+    return ""
+
+
+def check_udp_protocol(data):
+    """Определяет протокол UDP по ответу"""
+    if not data:
+        return ""
+
+    if len(data) >= 1 and data[0] == 0x1b:
+        return 'NTP'
+
+    if len(data) >= 12 and (data[2] & 0x80):
+        return 'DNS'
+
+    if len(data) >= 2 and data[0] == 0x30:
+        return 'SNMP'
+
+    return ""
+
+
+def scan_tcp(host, port):
+    """Сканирование TCP порта"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
+        sock.settimeout(1.5)
 
-        start_time = time.time()
-        result = sock.connect_ex((host, port))
+        if sock.connect_ex((host, port)) == 0:
+            protocol = ""
 
-        if result == 0:
-            protocol = None
-
-            # Пытаемся получить баннер
+            # Сначала пробуем прочитать баннер
             try:
-                # Отправляем соответствующий запрос в зависимости от порта
-                if port == 80 or port == 443 or port == 8080:
-                    sock.send(b'HEAD / HTTP/1.0\r\n\r\n')
-                elif port == 21:
-                    sock.send(b'NOOP\r\n')
-                elif port == 25:
-                    sock.send(b'EHLO test\r\n')
-                elif port == 110:
-                    sock.send(b'CAPA\r\n')
-                elif port == 143:
-                    sock.send(b'CAPABILITY\r\n')
-                elif port == 22:
-                    sock.send(b'\r\n')
-                else:
-                    sock.send(b'\r\n')
-
                 sock.settimeout(1)
                 data = sock.recv(1024)
-
-                # Определяем протокол по баннеру
-                protocol = get_protocol_by_banner(port, data)
-
-                # Специальная обработка для DNS
-                if port == 53 and not protocol:
-                    protocol = 'DNS'
-
-            except socket.timeout:
-                pass
-            except Exception:
+                protocol = check_tcp_protocol(data)
+            except:
                 pass
 
-            # Если не распознали, используем известный порт
-            if not protocol and port in PORT_PROTOCOLS:
-                protocol = PORT_PROTOCOLS[port]
+            # Если нет, отправляем probes
+            if not protocol:
+                for name in ['HTTP', 'SMTP', 'POP3', 'IMAP']:
+                    try:
+                        sock.send(PROBES[name])
+                        sock.settimeout(1)
+                        data = sock.recv(1024)
+                        protocol = check_tcp_protocol(data)
+                        if protocol:
+                            break
+                    except:
+                        continue
 
-            sock.close()
-            return port, protocol, time.time() - start_time
-        else:
-            sock.close()
-            return None
-    except socket.error:
-        return None
-    except Exception:
-        return None
+            if protocol:
+                print(f"TCP {port} {protocol}")
+            else:
+                print(f"TCP {port}")
+
+        sock.close()
+    except Exception as e:
+        pass
 
 
-def scan_udp_port(host, port, timeout=2):
-    """Сканирует UDP порт"""
+def scan_udp(host, port):
+    """Сканирование UDP порта"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(timeout)
+        sock.settimeout(1.5)
 
-        # Отправляем специфичные запросы для разных протоколов
-        message = b''
-        if port == 53:  # DNS
-            # DNS запрос для version.bind
-            message = b'\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03'
-        elif port == 123:  # NTP
-            message = b'\x1b' + 47 * b'\x00'
-        elif port == 161:  # SNMP
-            message = b'\x30\x26\x02\x01\x00\x04\x06\x70\x75\x62\x6c\x69\x63\xa0\x19\x02\x02\x1f\x40\x02\x01\x00\x02\x01\x00\x30\x0d\x30\x0b\x06\x07\x2b\x06\x01\x02\x01\x01\x01\x05\x00'
-
-        sock.sendto(message, (host, port))
+        # Отправляем запрос в зависимости от порта
+        if port == 53:
+            sock.sendto(create_dns_query(), (host, port))
+        elif port == 123:
+            sock.sendto(PROBES['NTP'], (host, port))
+        elif port == 161:
+            sock.sendto(PROBES['SNMP'], (host, port))
+        else:
+            sock.sendto(b'\r\n', (host, port))
 
         try:
-            data, addr = sock.recvfrom(1024)
-            protocol = None
-
-            # Распознавание по ответу
-            if port == 53 and data:
-                protocol = 'DNS'
-            elif port == 123 and data and len(data) > 0:
-                protocol = 'NTP'
-            elif port in PORT_PROTOCOLS:
-                protocol = PORT_PROTOCOLS[port]
-
-            sock.close()
-            return port, protocol, time.time()
+            data, _ = sock.recvfrom(1024)
+            protocol = check_udp_protocol(data)
+            if protocol:
+                print(f"UDP {port} {protocol}")
+            else:
+                print(f"UDP {port}")
         except socket.timeout:
-            # UDP порт может быть открыт, но не отвечать
-            sock.close()
-            if port in PORT_PROTOCOLS:
-                return port, PORT_PROTOCOLS[port], time.time()
-            return None
-        except:
-            sock.close()
-            return None
-    except PermissionError:
-        print(f"Предупреждение: недостаточно прав для UDP порта {port} (запустите с правами администратора)")
-        return None
-    except socket.error:
-        return None
+            pass
+
+        sock.close()
     except Exception:
-        return None
-
-
-def scan_ports(host, start_port, count, scan_tcp=True, scan_udp=True, max_workers=200):
-    """Многопоточное сканирование портов"""
-    end_port = start_port + count
-    results = {'TCP': [], 'UDP': []}
-
-    if scan_tcp:
-        print(f"\nСканирование TCP портов {start_port}-{end_port - 1} на {host}...")
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(scan_tcp_port, host, port): port
-                       for port in range(start_port, end_port)}
-
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
-                if completed % 50 == 0:
-                    print(f"   Прогресс TCP: {completed}/{count} портов", end='\r')
-
-                result = future.result()
-                if result:
-                    port, protocol, _ = result
-                    results['TCP'].append((port, protocol))
-
-        print(f"\n   TCP сканирование завершено. Найдено открытых портов: {len(results['TCP'])}")
-
-    if scan_udp:
-        print(f"\nСканирование UDP портов {start_port}-{end_port - 1} на {host}...")
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(scan_udp_port, host, port): port
-                       for port in range(start_port, end_port)}
-
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
-                if completed % 50 == 0:
-                    print(f"   Прогресс UDP: {completed}/{count} портов", end='\r')
-
-                result = future.result()
-                if result:
-                    port, protocol, _ = result
-                    results['UDP'].append((port, protocol))
-
-        print(f"\n   UDP сканирование завершено. Найдено открытых портов: {len(results['UDP'])}")
-
-    return results
+        pass
 
 
 def main():
-    parser = argparse.ArgumentParser(description='TCP/UDP Port Scanner')
-    parser.add_argument('--tcp', '-t', action='store_true', help='Сканировать TCP порты')
-    parser.add_argument('--udp', '-u', action='store_true', help='Сканировать UDP порты')
-    parser.add_argument('--start', type=int, required=True, help='Начальное значение диапазона портов')
-    parser.add_argument('--count', type=int, required=True, help='Количество исследуемых портов')
-    parser.add_argument('host', help='IP-адрес или DNS-имя удалённого хоста')
+    parser = argparse.ArgumentParser(description='Сканер портов TCP/UDP')
+    parser.add_argument('host', help='IP-адрес или доменное имя')
+    parser.add_argument('-t', '--tcp', action='store_true', help='Сканировать TCP')
+    parser.add_argument('-u', '--udp', action='store_true', help='Сканировать UDP')
+    parser.add_argument('--start', type=int, default=1, help='Начальный порт (по умолч: 1)')
+    parser.add_argument('--count', type=int, default=100, help='Количество портов (по умолч: 100)')
+    parser.add_argument('--threads', type=int, default=50, help='Количество потоков (по умолч: 50)')
 
     args = parser.parse_args()
 
-    # Если не указаны ни TCP, ни UDP, сканируем оба
-    scan_tcp = args.tcp or not (args.tcp or args.udp)
-    scan_udp = args.udp or not (args.tcp or args.udp)
+    # Если не указаны флаги - сканируем TCP
+    if not args.tcp and not args.udp:
+        args.tcp = True
 
-    # Преобразуем DNS имя в IP
-    try:
-        host_ip = socket.gethostbyname(args.host)
-        print(f"\nСканирование хоста: {args.host} ({host_ip})")
-    except socket.gaierror:
-        print(f"Ошибка: не удалось разрешить DNS имя '{args.host}'")
-        return
-
-    # Проверка валидности параметров
+    # Проверка портов
     if args.start < 0 or args.start > 65535:
-        print("Ошибка: начальный порт должен быть в диапазоне 0-65535")
+        print("Ошибка: порт должен быть 0-65535")
         return
 
     if args.count <= 0 or args.start + args.count > 65536:
-        print("Ошибка: неверное количество портов или выход за пределы диапазона")
+        print("Ошибка: неверное количество портов")
         return
 
-    # Запуск сканирования
+    # Получаем IP
+    try:
+        ip = socket.gethostbyname(args.host)
+        print(f"\n[*] Сканирование: {args.host} ({ip})")
+        print(f" Порты: {args.start}-{args.start + args.count - 1}")
+    except socket.gaierror:
+        print(f"Ошибка: не могу разрешить '{args.host}'")
+        return
+
     start_time = time.time()
-    results = scan_ports(host_ip, args.start, args.count, scan_tcp, scan_udp)
-    elapsed_time = time.time() - start_time
+    threads = []
+    end_port = args.start + args.count
 
-    # Вывод результатов
-    print(f"РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ (время: {elapsed_time:.2f} сек)")
+    # Запускаем сканирование
+    for port in range(args.start, end_port):
+        if args.tcp:
+            t = threading.Thread(target=scan_tcp, args=(ip, port))
+            threads.append(t)
+            t.start()
 
-    found_any = False
+        if args.udp:
+            t = threading.Thread(target=scan_udp, args=(ip, port))
+            threads.append(t)
+            t.start()
 
-    for protocol_type in ['TCP', 'UDP']:
-        if results[protocol_type]:
-            found_any = True
-            print(f"\n{protocol_type} порты:")
-            for port, proto in sorted(results[protocol_type]):
-                if proto:
-                    print(f"  {protocol_type} {port} {proto}")
-                else:
-                    print(f"  {protocol_type} {port}")
+        # Ограничиваем количество потоков
+        if len(threads) >= args.threads:
+            for t in threads:
+                t.join()
+            threads = []
 
-    if not found_any:
-        print("\nОткрытых портов не найдено!")
+    # Ждем завершения всех потоков
+    for t in threads:
+        t.join()
+
+    elapsed = time.time() - start_time
+    print(f"\n Время: {elapsed:.2f} сек")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Прервано пользователем")
+        sys.exit(0)
