@@ -1,0 +1,29 @@
+cd PycharmProjects\protocol_1_task
+python portscan.py --tcp --start 1 --count 1000 127.0.0.1
+python portscan.py --tcp --start 1 --count 100 chess.com
+python portscan.py --tcp --start 53 --count 1 8.8.8.8
+python portscan.py --tcp --start 443 --count 1 google.com
+python portscan.py --udp --start 53 --count 1 8.8.8.8
+
+
+Сканер пытается установить соединение с каждым портом в заданном диапазоне.
+Если соединение успешно - порт считается открытым.
+
+TCP scan:
+Создаётся сокет socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+Вызывается connect_ex() - неблокирующая попытка подключения
+Если возвращает 0 - порт открыт
+После подключения отправляется простой запрос (HEAD, EHLO, NOOP и т.д.)
+Полученный ответ (баннер) сравнивается с сигнатурами протоколов
+При совпадении выводится название протокола
+
+UDP scan:
+Создаётся датаграммный сокет socket.SOCK_DGRAM
+Отправляется пустой или специальный пакет
+Если приходит ответ - порт открыт
+Отсутствие ответа не означает закрытый порт (UDP не гарантирует доставку)
+
+Многопоточность
+Используется ThreadPoolExecutor из concurrent.futures.
+Параллельно сканируется до 200 портов, что ускоряет работу в десятки раз.
+
