@@ -1,9 +1,12 @@
 cd PycharmProjects\protocol_1_task
 
-python dnsc.py -p 5353 -f 8.8.8.8
+python dnsc.py -p 53 -f 8.8.8.8
+python test_all_types.py
 
-dig @127.0.0.1 -p 5353 urfu.ru A
-dig @127.0.0.1 -p 5353 urfu.ru A  # второй раз из кэша
+nslookup urfu.ru 127.0.0.1
+nslookup -type=MX urfu.ru 127.0.0.1
+
+
 
 вывод:
 Server started on port 5353, forwarder 8.8.8.8:53
