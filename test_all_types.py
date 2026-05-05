@@ -55,7 +55,6 @@ types = [
 ]
 
 print("Тестирование различных типов DNS запросов:")
-print("=" * 50)
 
 for qtype, name in types:
     send_query('urfu.ru', qtype, name)

@@ -8,22 +8,22 @@ cache = {}
 
 # Типы DNS записей
 TYPE_NAMES = {
-    1: 'A',
-    2: 'NS',
-    5: 'CNAME',
-    6: 'SOA',
-    12: 'PTR',
-    13: 'HINFO',
-    15: 'MX',
-    28: 'AAAA'
+    1: 'A',  # IPv4
+    2: 'NS',  # Name Server
+    5: 'CNAME',  # Canonical Name
+    6: 'SOA',  # Start of Authority (информация о зоне)
+    12: 'PTR',  # Pointer (для обратных запросов)
+    13: 'HINFO',  # Host Information
+    15: 'MX',  # Mail Exchange
+    28: 'AAAA'  # IPv6
 }
 
 
 def parse_dns_name(data, offset):
-    """Парсинг DNS имени с поддержкой компрессии"""
-    labels = []
+    """Преобразует DNS-имя из бинарного формата в строку"""
+    labels = []  # Список для частей имени
     pos = offset
-    jumped = False
+    jumped = False  # Флаг, был ли прыжок по компрессии
     original_pos = pos
 
     while True:
@@ -40,11 +40,13 @@ def parse_dns_name(data, offset):
         if length & 0xC0:
             if not jumped:
                 original_pos = pos + 2
+            # Вычисляем смещение
             pointer = ((length & 0x3F) << 8) | data[pos + 1]
             pos = pointer
             jumped = True
             continue
 
+        # Обычная метка
         pos += 1
         if pos + length > len(data):
             return None, pos
@@ -71,8 +73,9 @@ def encode_dns_name(name):
 
 def build_response(query, answers):
     """Сборка DNS ответа для любого типа записей"""
-    tid = query[:2]
+    tid = query[:2]  # ID транзакции из запроса
     header = tid + b'\x81\x80' + b'\x00\x01' + struct.pack('!H', len(answers)) + b'\x00\x00\x00\x00'
+    # 0x8180 = QR=1, Opcode=0, AA=0, TC=0, RD=0, RA=0, RCODE=0
 
     # Извлекаем вопрос из запроса
     pos = 12
@@ -85,10 +88,10 @@ def build_response(query, answers):
     answer_section = b''
     for rname, rtype, ttl, rdata in answers:
         answer_section += b'\xc0\x0c'  # Указатель на имя
-        answer_section += struct.pack('!H', rtype)
-        answer_section += struct.pack('!H', qclass)
-        answer_section += struct.pack('!I', ttl)
-        answer_section += struct.pack('!H', len(rdata))
+        answer_section += struct.pack('!H', rtype)  # Тип
+        answer_section += struct.pack('!H', qclass)  # Класс
+        answer_section += struct.pack('!I', ttl)   # TTL
+        answer_section += struct.pack('!H', len(rdata))  # Длина данных
         answer_section += rdata
 
     return header + question + answer_section
@@ -209,7 +212,7 @@ def main():
                 sock.sendto(response, addr)
 
             except socket.timeout:
-                # SERVFAIL - форвардер не ответил
+                # SERVFAIL - форвардер не ответил: 0x8182 = ответ + RCODE=2
                 tid = data[:2]
                 header = tid + b'\x81\x82' + b'\x00\x01' + b'\x00\x00\x00\x00\x00\x00'
                 question_pos = 12
