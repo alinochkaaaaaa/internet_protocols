@@ -1,0 +1,198 @@
+import socket
+import struct
+import sys
+import time
+
+cache = {}
+
+TYPE_NAMES = {
+    1: 'A',
+    2: 'NS',
+    5: 'CNAME',
+    6: 'SOA',
+    12: 'PTR',
+    15: 'MX',
+    28: 'AAAA'
+}
+
+
+def parse_dns_name(data, offset):
+    labels = []
+    pos = offset
+    jumped = False
+    original_pos = pos
+
+    while True:
+        if pos >= len(data):
+            return None, pos
+
+        length = data[pos]
+
+        if length == 0:
+            pos += 1
+            break
+
+        if length & 0xC0:
+            if not jumped:
+                original_pos = pos + 2
+            pointer = ((length & 0x3F) << 8) | data[pos + 1]
+            pos = pointer
+            jumped = True
+            continue
+
+        pos += 1
+        if pos + length > len(data):
+            return None, pos
+
+        label = data[pos:pos + length].decode('ascii')
+        labels.append(label)
+        pos += length
+
+    if jumped:
+        pos = original_pos
+
+    return '.'.join(labels), pos
+
+
+def encode_dns_name(name):
+    parts = name.split('.')
+    result = b''
+    for part in parts:
+        result += bytes([len(part)]) + part.encode('ascii')
+    result += b'\x00'
+    return result
+
+
+def build_response(query, answers):
+    tid = query[:2]
+    header = tid + b'\x81\x80' + b'\x00\x01' + struct.pack('!H', len(answers)) + b'\x00\x00\x00\x00'
+
+    pos = 12
+    qname, pos = parse_dns_name(query, pos)
+    qtype = struct.unpack('!H', query[pos:pos + 2])[0]
+    qclass = struct.unpack('!H', query[pos + 2:pos + 4])[0]
+    question = query[12:pos + 4]
+
+    answer_section = b''
+    for rname, rtype, ttl, rdata in answers:
+        answer_section += b'\xc0\x0c'
+        answer_section += struct.pack('!H', rtype)
+        answer_section += struct.pack('!H', qclass)
+        answer_section += struct.pack('!I', ttl)
+        answer_section += struct.pack('!H', len(rdata))
+        answer_section += rdata
+
+    return header + question + answer_section
+
+
+def parse_rdata(response, offset, rtype, rdlength):
+    if rtype == 1:
+        return response[offset:offset + rdlength]
+    elif rtype in (2, 5, 12):
+        name, _ = parse_dns_name(response, offset)
+        return encode_dns_name(name)
+    else:
+        return response[offset:offset + rdlength]
+
+
+def main():
+    port = 53
+    forwarder = ('8.8.8.8', 53)
+
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == '-p' and i + 1 < len(sys.argv):
+            port = int(sys.argv[i + 1])
+            i += 2
+        elif sys.argv[i] == '-f' and i + 1 < len(sys.argv):
+            fwd = sys.argv[i + 1]
+            if ':' in fwd:
+                host, p = fwd.split(':')
+                forwarder = (host, int(p))
+            else:
+                forwarder = (fwd, 53)
+            i += 2
+        else:
+            i += 1
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', port))
+
+    print(f"DNS Server on port {port}, forwarder {forwarder[0]}:{forwarder[1]}")
+    print(f"Supported types: {', '.join(TYPE_NAMES.values())}")
+
+    while True:
+        try:
+            data, addr = sock.recvfrom(512)
+
+            pos = 12
+            qname, pos = parse_dns_name(data, pos)
+
+            if not qname:
+                continue
+
+            qtype = struct.unpack('!H', data[pos:pos + 2])[0]
+            qclass = struct.unpack('!H', data[pos + 2:pos + 4])[0]
+            qtype_name = TYPE_NAMES.get(qtype, f"TYPE{qtype}")
+
+            cache_key = (qname, qtype, qclass)
+            if cache_key in cache:
+                rdata, expiry = cache[cache_key]
+                if time.time() < expiry:
+                    ttl = int(expiry - time.time())
+                    answers = [(qname, qtype, ttl, rdata)]
+                    response = build_response(data, answers)
+                    sock.sendto(response, addr)
+                    print(f"{addr[0]}, {qtype_name}, {qname}, cache")
+                    continue
+
+            print(f"{addr[0]}, {qtype_name}, {qname}, forwarder")
+
+            fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            fwd.settimeout(5)
+
+            try:
+                fwd.sendto(data, forwarder)
+                response, _ = fwd.recvfrom(512)
+
+                resp_pos = 12
+                _, resp_pos = parse_dns_name(response, resp_pos)
+                resp_pos += 4
+
+                ancount = struct.unpack('!H', response[6:8])[0]
+
+                for _ in range(ancount):
+                    name, resp_pos = parse_dns_name(response, resp_pos)
+
+                    rtype = struct.unpack('!H', response[resp_pos:resp_pos + 2])[0]
+                    rclass = struct.unpack('!H', response[resp_pos + 2:resp_pos + 4])[0]
+                    ttl = struct.unpack('!I', response[resp_pos + 4:resp_pos + 8])[0]
+                    rdlength = struct.unpack('!H', response[resp_pos + 8:resp_pos + 10])[0]
+                    resp_pos += 10
+
+                    rdata = parse_rdata(response, resp_pos, rtype, rdlength)
+
+                    cache[(name, rtype, rclass)] = (rdata, time.time() + ttl)
+
+                    resp_pos += rdlength
+
+                sock.sendto(response, addr)
+
+            except socket.timeout:
+                tid = data[:2]
+                header = tid + b'\x81\x82' + b'\x00\x01' + b'\x00\x00\x00\x00\x00\x00'
+                question_pos = 12
+                _, question_pos = parse_dns_name(data, question_pos)
+                question = data[12:question_pos + 4]
+                sock.sendto(header + question, addr)
+            finally:
+                fwd.close()
+
+        except Exception as e:
+            print(f"Error: {e}")
+            continue
+
+
+if __name__ == '__main__':
+    main()
